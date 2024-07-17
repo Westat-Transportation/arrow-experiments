@@ -23,7 +23,7 @@ function randint_nullable(n::Integer)
     return v
 end
 
-function get_stream(::HTTP.Request)
+function get_stream()
     total_records = 100_000_000
     batch_len = 4096
     stream = Tables.partitioner(Iterators.partition(1:total_records, batch_len)) do indices
@@ -35,10 +35,24 @@ function get_stream(::HTTP.Request)
             d = randint_nullable(nrows)
         )
     end
-    buffer = IOBuffer()
-    Arrow.write(buffer, stream)
-    return HTTP.Response(200, take!(buffer))
+    return stream
 end
 
 println("Serving on localhost:8008...")
-server = HTTP.serve(get_stream, "127.0.0.1", 8008)
+HTTP.listen("127.0.0.1", 8008) do http::HTTP.Stream
+    HTTP.setstatus(http, 200)
+    HTTP.setheader(http, "Transfer-Encoding" => "chunked")
+    batches = get_stream()
+    HTTP.startwrite(http)
+    buffer = IOBuffer()
+    for batch in batches
+        truncate(buffer, 0)
+        Arrow.write(buffer, batch, file=false)
+        nbytes = position(buffer)
+        seekstart(buffer)
+        write(http, "$(string(nbytes, base=16))\r\n")
+        write(http, buffer)
+        write(http, "\r\n")
+    end
+    write(http, "0\r\n\r\n")
+end
